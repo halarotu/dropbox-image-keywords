@@ -1,0 +1,30 @@
+{
+  "name": "dropbox-image-keywords",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Scheduled job that finds new images in Dropbox, extracts keywords with a vision model and stores them in Firestore.",
+  "main": "dist/index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/index.js run",
+    "scan": "node dist/index.js scan",
+    "process": "node dist/index.js process",
+    "dev": "tsx --env-file=.env src/index.ts run",
+    "test": "node --import tsx --test test/*.test.ts",
+    "dropbox:token": "tsx scripts/get-dropbox-refresh-token.ts"
+  },
+  "dependencies": {
+    "@google-cloud/firestore": "^9.4.0",
+    "dropbox": "^10.47.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}
