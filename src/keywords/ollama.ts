@@ -9,7 +9,7 @@ const chatResponseSchema = z.object({
 });
 
 const METADATA_IDENTITY_URL =
-  "http://metadata.google.internal/computeMetadata/v1/instance/service-account/identity";
+  "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity";
 
 /**
  * Talks to a self-hosted Ollama server (e.g. on Cloud Run with a GPU) through its

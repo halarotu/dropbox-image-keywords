@@ -11,18 +11,23 @@ const csv = (fallback: string) =>
         .filter(Boolean),
     );
 
-const schema = z.object({
+/** Settings shared by the job and the API. */
+const shared = {
   // Dropbox (scoped app with files.metadata.read + files.content.read)
   DROPBOX_APP_KEY: z.string().min(1),
   DROPBOX_APP_SECRET: z.string().min(1),
   DROPBOX_REFRESH_TOKEN: z.string().min(1),
-  /** Comma-separated Dropbox folders to watch. "" means the whole Dropbox / app folder. */
-  DROPBOX_ROOTS: csv(""),
-  IMAGE_EXTENSIONS: csv("jpg,jpeg,png,gif,webp,tif,tiff,bmp"),
 
   // Firestore
   GCP_PROJECT_ID: z.string().optional(),
   FIRESTORE_DATABASE_ID: z.string().default("(default)"),
+};
+
+const schema = z.object({
+  ...shared,
+  /** Comma-separated Dropbox folders to watch. "" means the whole Dropbox / app folder. */
+  DROPBOX_ROOTS: csv(""),
+  IMAGE_EXTENSIONS: csv("jpg,jpeg,png,gif,webp,tif,tiff,bmp"),
 
   // Keyword provider
   KEYWORD_PROVIDER: z.enum(["ollama"]).default("ollama"),
@@ -49,9 +54,23 @@ const schema = z.object({
   LOCK_LEASE_MINUTES: z.coerce.number().int().positive().default(30),
 });
 
-export type Config = z.infer<typeof schema>;
+const apiSchema = z.object({
+  ...shared,
+  PORT: z.coerce.number().int().positive().default(8080),
+  /** "iap" verifies the signed header IAP adds to every request. "none" is for local development only. */
+  API_AUTH: z.enum(["iap", "none"]).default("iap"),
+  /** Cloud Run with IAP: /projects/PROJECT_NUMBER/locations/REGION/services/SERVICE_NAME */
+  IAP_AUDIENCE: z.string().optional(),
+  /** The built SPA (web/dist). Served for every path outside /api. */
+  WEB_DIST_DIR: z.string().default("web/dist"),
+});
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
+export type Config = z.infer<typeof schema>;
+export type ApiConfig = z.infer<typeof apiSchema>;
+export type FirestoreConfig = Pick<Config, "GCP_PROJECT_ID" | "FIRESTORE_DATABASE_ID">;
+export type DropboxConfig = Pick<Config, "DROPBOX_APP_KEY" | "DROPBOX_APP_SECRET" | "DROPBOX_REFRESH_TOKEN">;
+
+function parse<T extends z.ZodType>(schema: T, env: NodeJS.ProcessEnv): z.infer<T> {
   const parsed = schema.safeParse(env);
   if (!parsed.success) {
     const issues = parsed.error.issues
@@ -59,7 +78,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       .join("\n");
     throw new Error(`Invalid configuration:\n${issues}`);
   }
-  const cfg = parsed.data;
+  return parsed.data;
+}
+
+export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
+  const cfg = parse(schema, env);
   if (cfg.KEYWORD_PROVIDER === "ollama" && !cfg.LLM_URL) {
     throw new Error("LLM_URL is required when KEYWORD_PROVIDER=ollama");
   }
@@ -68,5 +91,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     r === "/" ? "" : r.replace(/\/+$/, ""),
   );
   cfg.IMAGE_EXTENSIONS = cfg.IMAGE_EXTENSIONS.map((e) => e.toLowerCase().replace(/^\./, ""));
+  return cfg;
+}
+
+export function loadApiConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
+  const cfg = parse(apiSchema, env);
+  if (cfg.API_AUTH === "iap" && !cfg.IAP_AUDIENCE) {
+    throw new Error("IAP_AUDIENCE is required when API_AUTH=iap");
+  }
   return cfg;
 }

@@ -1,11 +1,11 @@
 import { Dropbox, DropboxResponseError } from "dropbox";
-import type { Config } from "../config";
+import type { DropboxConfig } from "../config";
 
 /**
  * Creates a Dropbox client that refreshes short-lived access tokens automatically
  * from the long-lived refresh token.
  */
-export function createDropboxClient(cfg: Config): Dropbox {
+export function createDropboxClient(cfg: DropboxConfig): Dropbox {
   return new Dropbox({
     clientId: cfg.DROPBOX_APP_KEY,
     clientSecret: cfg.DROPBOX_APP_SECRET,

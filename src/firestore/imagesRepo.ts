@@ -1,5 +1,6 @@
 import {
   DocumentReference,
+  FieldPath,
   Firestore,
   Timestamp,
   type UpdateData,
@@ -11,6 +12,16 @@ import type { ImageDoc, ImageStatus } from "./types";
 import { docIdForDropboxId, type FileEntry } from "../dropbox/images";
 
 const BATCH_LIMIT = 450; // Firestore allows 500 writes per batch; keep headroom.
+/** AND searches filter in code; stop after this many candidates so one request stays cheap. */
+const SEARCH_SCAN_LIMIT = 1000;
+
+export type SearchMode = "all" | "any";
+
+export interface SearchPage {
+  items: ImageDoc[];
+  /** Pass back as `cursor` for the next page; null when there are no more results. */
+  nextCursor: string | null;
+}
 
 export class ImagesRepo {
   constructor(private readonly db: Firestore) {}
@@ -204,6 +215,57 @@ export class ImagesRepo {
     });
   }
 
+  /** A tagged image by its document id, or null if it doesn't exist or has no keywords yet. */
+  async getDone(id: string): Promise<ImageDoc | null> {
+    const snap = await this.col().doc(id).get();
+    if (!snap.exists || snap.get("status") !== "done") return null;
+    return snap.data() as ImageDoc;
+  }
+
+  /**
+   * Tagged images whose searchTerms contain all (or any) of `terms`, newest first.
+   * Needs the (status, searchTerms, modifiedAt desc) index. Firestore allows one array-contains
+   * per query, so "all" queries the most selective-looking term and filters the rest in code.
+   */
+  async search(
+    terms: string[],
+    opts: { mode: SearchMode; limit: number; cursor?: string | null },
+  ): Promise<SearchPage> {
+    if (!terms.length) return { items: [], nextCursor: null };
+
+    let query = this.col().where("status", "==", "done");
+    query =
+      opts.mode === "any"
+        ? query.where("searchTerms", "array-contains-any", terms)
+        : query.where("searchTerms", "array-contains", pickQueryTerm(terms));
+    query = query.orderBy("modifiedAt", "desc").orderBy(FieldPath.documentId(), "desc");
+
+    const items: ImageDoc[] = [];
+    let after = opts.cursor ? decodeCursor(opts.cursor) : null;
+    let scanned = 0;
+    const pageSize = opts.mode === "any" ? opts.limit + 1 : Math.max(opts.limit * 2, 50);
+
+    while (scanned < SEARCH_SCAN_LIMIT) {
+      const page = after ? query.startAfter(after.modifiedAt, after.id) : query;
+      const snap = await page.limit(pageSize).get();
+      for (const d of snap.docs) {
+        const img = d.data() as ImageDoc;
+        if (opts.mode === "all" && !matchesAll(img.searchTerms, terms)) continue;
+        if (items.length === opts.limit) {
+          // There's at least one more match: continue after the last one we return.
+          return { items, nextCursor: encodeCursor(items[items.length - 1]) };
+        }
+        items.push(img);
+      }
+      scanned += snap.size;
+      if (snap.size < pageSize) return { items, nextCursor: null }; // no more candidates
+      const last = snap.docs[snap.docs.length - 1].data() as ImageDoc;
+      after = { modifiedAt: last.modifiedAt, id: docIdForDropboxId(last.dropboxId) };
+    }
+    // Scan budget used up: let the client continue from where we stopped.
+    return { items, nextCursor: after ? encodeCursorParts(after.modifiedAt, after.id) : null };
+  }
+
   async markDeleted(ref: DocumentReference) {
     const now = Timestamp.now();
     await ref.update({ status: "deleted", deletedAt: now, updatedAt: now });
@@ -232,4 +294,40 @@ export function decideStatus(
   if (keywordsCurrent) return "done";
   if (!hasKeywords || reprocessOnChange) return "pending"; // also gives failed images a fresh start
   return null;
+}
+
+/** The longest term is usually the rarest, which keeps the candidate set small. */
+export function pickQueryTerm(terms: readonly string[]): string {
+  return terms.reduce((a, b) => (b.length > a.length ? b : a));
+}
+
+export function matchesAll(searchTerms: readonly string[], terms: readonly string[]): boolean {
+  return terms.every((t) => searchTerms.includes(t));
+}
+
+/** Cursor = position in the (modifiedAt desc, id desc) order, as an opaque URL-safe string. */
+export function encodeCursor(img: Pick<ImageDoc, "modifiedAt" | "dropboxId">): string {
+  return encodeCursorParts(img.modifiedAt, docIdForDropboxId(img.dropboxId));
+}
+
+function encodeCursorParts(modifiedAt: Timestamp, id: string): string {
+  return Buffer.from(JSON.stringify([modifiedAt.toMillis(), id])).toString("base64url");
+}
+
+export function decodeCursor(cursor: string): { modifiedAt: Timestamp; id: string } {
+  try {
+    const [millis, id] = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+    if (typeof millis === "number" && typeof id === "string" && id) {
+      return { modifiedAt: Timestamp.fromMillis(millis), id };
+    }
+  } catch {
+    // fall through
+  }
+  throw new InvalidCursorError();
+}
+
+export class InvalidCursorError extends Error {
+  constructor() {
+    super("Invalid cursor");
+  }
 }

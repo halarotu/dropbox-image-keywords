@@ -2,6 +2,7 @@ import type { DocumentReference } from "@google-cloud/firestore";
 import type { Dropbox } from "dropbox";
 import type { Config } from "./config";
 import { dropboxErrorSummary, isDropboxError } from "./dropbox/client";
+import { fetchThumbnail } from "./dropbox/thumbnails";
 import type { ImagesRepo } from "./firestore/imagesRepo";
 import type { ImageDoc } from "./firestore/types";
 import { buildSearchTerms, normalizeKeywords } from "./keywords/normalize";
@@ -71,7 +72,8 @@ async function processOne(
       return "reused";
     }
 
-    const thumbnail = await fetchThumbnail(dbx, img.dropboxId);
+    // A 1024x768 JPEG is plenty for tagging and keeps API costs down.
+    const thumbnail = await fetchThumbnail(dbx, img.dropboxId, "w1024h768");
     const raw = await provider.extractKeywords(thumbnail, "image/jpeg");
     const keywords = normalizeKeywords(raw, cfg.MAX_KEYWORDS);
     if (!keywords.length) throw new Error("Model returned no usable keywords");
@@ -88,19 +90,6 @@ async function processOne(
   } catch (err) {
     return handleError(err, ref, img, cfg, images, ctx);
   }
-}
-
-/** A JPEG thumbnail (max 1024x768) is plenty for tagging and keeps API costs down. */
-async function fetchThumbnail(dbx: Dropbox, dropboxId: string): Promise<Buffer> {
-  const res = await dbx.filesGetThumbnailV2({
-    resource: { ".tag": "path", path: dropboxId },
-    format: { ".tag": "jpeg" },
-    size: { ".tag": "w1024h768" },
-    mode: { ".tag": "bestfit" },
-  });
-  const bin = res.result.fileBinary;
-  if (!bin) throw new Error("Dropbox returned no thumbnail data");
-  return Buffer.from(bin);
 }
 
 async function handleError(

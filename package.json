@@ -13,13 +13,18 @@
     "start": "node dist/index.js run",
     "scan": "node dist/index.js scan",
     "process": "node dist/index.js process",
+    "api": "node dist/api/index.js",
     "dev": "tsx --env-file=.env src/index.ts run",
+    "dev:api": "API_AUTH=none WEB_DIST_DIR=web/dist tsx watch --env-file=.env src/api/index.ts",
     "test": "node --import tsx --test test/*.test.ts",
     "dropbox:token": "tsx scripts/get-dropbox-refresh-token.ts"
   },
   "dependencies": {
     "@google-cloud/firestore": "^9.4.0",
+    "@hono/node-server": "^2.1.6",
     "dropbox": "^10.47.0",
+    "google-auth-library": "^11.3.2",
+    "hono": "^4.13.16",
     "zod": "^4.6.7"
   },
   "devDependencies": {
