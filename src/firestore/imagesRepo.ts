@@ -10,12 +10,19 @@ import { chunk } from "../util/concurrency";
 import { COLLECTIONS } from "./db";
 import type { ImageDoc, ImageStatus } from "./types";
 import { docIdForDropboxId, type FileEntry } from "../dropbox/images";
+import { deriveTakenYear } from "../dropbox/takenYear";
 
 const BATCH_LIMIT = 450; // Firestore allows 500 writes per batch; keep headroom.
 /** AND searches filter in code; stop after this many candidates so one request stays cheap. */
 const SEARCH_SCAN_LIMIT = 1000;
 
 export type SearchMode = "all" | "any";
+
+/** Inclusive year bounds; either end may be open. */
+export interface YearRange {
+  from?: number;
+  to?: number;
+}
 
 export interface SearchPage {
   items: ImageDoc[];
@@ -54,15 +61,20 @@ export class ImagesRepo {
 
       group.forEach((entry, i) => {
         const snap = snaps[i];
+        const path = entry.path_display ?? entry.name;
+        // Recomputed on every update, so a file moved into a "2016" folder picks up 2016.
+        const taken = deriveTakenYear(path, entry.name, now.toDate());
         const meta = {
           dropboxId: entry.id,
-          path: entry.path_display ?? entry.name,
+          path,
           pathLower: entry.path_lower ?? entry.name.toLowerCase(),
           name: entry.name,
           rev: entry.rev,
           contentHash: entry.content_hash ?? "",
           sizeBytes: entry.size,
           modifiedAt: Timestamp.fromDate(new Date(entry.server_modified)),
+          takenYear: taken.year,
+          takenYearSource: taken.source,
           updatedAt: now,
         };
 
@@ -223,13 +235,15 @@ export class ImagesRepo {
   }
 
   /**
-   * Tagged images whose searchTerms contain all (or any) of `terms`, newest first.
-   * Needs the (status, searchTerms, modifiedAt desc) index. Firestore allows one array-contains
-   * per query, so "all" queries the most selective-looking term and filters the rest in code.
+   * Tagged images whose searchTerms contain all (or any) of `terms`, optionally limited to a
+   * range of taken years, ordered by takenYear desc, then modifiedAt desc.
+   * Needs the (status, searchTerms, takenYear desc, modifiedAt desc) index. Firestore allows one
+   * array-contains per query, so "all" queries the most selective-looking term and filters the
+   * rest in code.
    */
   async search(
     terms: string[],
-    opts: { mode: SearchMode; limit: number; cursor?: string | null },
+    opts: { mode: SearchMode; limit: number; cursor?: string | null; years?: YearRange },
   ): Promise<SearchPage> {
     if (!terms.length) return { items: [], nextCursor: null };
 
@@ -238,7 +252,13 @@ export class ImagesRepo {
       opts.mode === "any"
         ? query.where("searchTerms", "array-contains-any", terms)
         : query.where("searchTerms", "array-contains", pickQueryTerm(terms));
-    query = query.orderBy("modifiedAt", "desc").orderBy(FieldPath.documentId(), "desc");
+    if (opts.years?.from !== undefined) query = query.where("takenYear", ">=", opts.years.from);
+    if (opts.years?.to !== undefined) query = query.where("takenYear", "<=", opts.years.to);
+    // takenYear must come first: Firestore orders by the range-filtered field before anything else.
+    query = query
+      .orderBy("takenYear", "desc")
+      .orderBy("modifiedAt", "desc")
+      .orderBy(FieldPath.documentId(), "desc");
 
     const items: ImageDoc[] = [];
     let after = opts.cursor ? decodeCursor(opts.cursor) : null;
@@ -246,7 +266,7 @@ export class ImagesRepo {
     const pageSize = opts.mode === "any" ? opts.limit + 1 : Math.max(opts.limit * 2, 50);
 
     while (scanned < SEARCH_SCAN_LIMIT) {
-      const page = after ? query.startAfter(after.modifiedAt, after.id) : query;
+      const page = after ? query.startAfter(after.takenYear, after.modifiedAt, after.id) : query;
       const snap = await page.limit(pageSize).get();
       for (const d of snap.docs) {
         const img = d.data() as ImageDoc;
@@ -259,11 +279,46 @@ export class ImagesRepo {
       }
       scanned += snap.size;
       if (snap.size < pageSize) return { items, nextCursor: null }; // no more candidates
-      const last = snap.docs[snap.docs.length - 1].data() as ImageDoc;
-      after = { modifiedAt: last.modifiedAt, id: docIdForDropboxId(last.dropboxId) };
+      after = cursorPosition(snap.docs[snap.docs.length - 1].data() as ImageDoc);
     }
     // Scan budget used up: let the client continue from where we stopped.
-    return { items, nextCursor: after ? encodeCursorParts(after.modifiedAt, after.id) : null };
+    return { items, nextCursor: after ? encodeCursorPosition(after) : null };
+  }
+
+  /**
+   * Sets takenYear on every image from its stored path and name. Safe to re-run: only documents
+   * whose value would change are written. Returns counts for logging.
+   */
+  async backfillTakenYear(now = new Date()): Promise<{ scanned: number; updated: number }> {
+    let scanned = 0;
+    let updated = 0;
+    let last: string | null = null;
+
+    while (true) {
+      let query = this.col()
+        .select("path", "name", "takenYear", "takenYearSource")
+        .orderBy(FieldPath.documentId())
+        .limit(BATCH_LIMIT);
+      if (last) query = query.startAfter(last);
+      const snap = await query.get();
+      if (snap.empty) break;
+
+      const batch = this.db.batch();
+      let writes = 0;
+      for (const d of snap.docs) {
+        const { year, source } = deriveTakenYear(d.get("path") ?? "", d.get("name") ?? "", now);
+        if (d.get("takenYear") === year && d.get("takenYearSource") === source) continue;
+        batch.update(d.ref, { takenYear: year, takenYearSource: source });
+        writes++;
+      }
+      if (writes) await batch.commit();
+
+      scanned += snap.size;
+      updated += writes;
+      last = snap.docs[snap.docs.length - 1].id;
+      if (snap.size < BATCH_LIMIT) break;
+    }
+    return { scanned, updated };
   }
 
   async markDeleted(ref: DocumentReference) {
@@ -305,20 +360,32 @@ export function matchesAll(searchTerms: readonly string[], terms: readonly strin
   return terms.every((t) => searchTerms.includes(t));
 }
 
-/** Cursor = position in the (modifiedAt desc, id desc) order, as an opaque URL-safe string. */
-export function encodeCursor(img: Pick<ImageDoc, "modifiedAt" | "dropboxId">): string {
-  return encodeCursorParts(img.modifiedAt, docIdForDropboxId(img.dropboxId));
+/** A position in the search order (takenYear desc, modifiedAt desc, id desc). */
+export interface CursorPosition {
+  takenYear: number;
+  modifiedAt: Timestamp;
+  id: string;
 }
 
-function encodeCursorParts(modifiedAt: Timestamp, id: string): string {
-  return Buffer.from(JSON.stringify([modifiedAt.toMillis(), id])).toString("base64url");
+function cursorPosition(img: Pick<ImageDoc, "takenYear" | "modifiedAt" | "dropboxId">): CursorPosition {
+  return { takenYear: img.takenYear, modifiedAt: img.modifiedAt, id: docIdForDropboxId(img.dropboxId) };
 }
 
-export function decodeCursor(cursor: string): { modifiedAt: Timestamp; id: string } {
+/** Cursor = position in the search order, as an opaque URL-safe string. */
+export function encodeCursor(img: Pick<ImageDoc, "takenYear" | "modifiedAt" | "dropboxId">): string {
+  return encodeCursorPosition(cursorPosition(img));
+}
+
+function encodeCursorPosition(p: CursorPosition): string {
+  return Buffer.from(JSON.stringify([p.takenYear, p.modifiedAt.toMillis(), p.id])).toString("base64url");
+}
+
+export function decodeCursor(cursor: string): CursorPosition {
   try {
-    const [millis, id] = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
-    if (typeof millis === "number" && typeof id === "string" && id) {
-      return { modifiedAt: Timestamp.fromMillis(millis), id };
+    const parts = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+    const [takenYear, millis, id] = Array.isArray(parts) ? parts : [];
+    if (Number.isInteger(takenYear) && typeof millis === "number" && typeof id === "string" && id) {
+      return { takenYear, modifiedAt: Timestamp.fromMillis(millis), id };
     }
   } catch {
     // fall through

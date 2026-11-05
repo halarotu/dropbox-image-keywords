@@ -25,12 +25,22 @@ export const THUMBNAIL_SIZES = { small: "w480h320", large: "w2048h1536" } as con
 
 const MAX_TERMS = 30; // array-contains-any accepts at most 30 values
 
-const searchQuery = z.object({
-  q: z.string().trim().min(1).max(500),
-  mode: z.enum(["all", "any"]).default("all"),
-  limit: z.coerce.number().int().min(1).max(100).default(50),
-  cursor: z.string().max(500).optional(),
-});
+const year = z.coerce.number().int().min(1900).max(2100).optional();
+
+const searchQuery = z
+  .object({
+    q: z.string().trim().min(1).max(500),
+    mode: z.enum(["all", "any"]).default("all"),
+    limit: z.coerce.number().int().min(1).max(100).default(50),
+    cursor: z.string().max(500).optional(),
+    /** Inclusive range of years the photo was taken. */
+    from: year,
+    to: year,
+  })
+  .refine((s) => s.from === undefined || s.to === undefined || s.from <= s.to, {
+    message: "from must not be after to",
+    path: ["from"],
+  });
 
 const thumbnailQuery = z.object({
   size: z.enum(["small", "large"]).default("small"),
@@ -46,6 +56,7 @@ export function toImageDto(img: ImageDoc) {
     path: img.path,
     keywords: img.keywords,
     modifiedAt: img.modifiedAt.toDate().toISOString(),
+    takenYear: img.takenYear ?? null,
     contentHash: img.contentHash,
   };
 }
@@ -66,13 +77,14 @@ export function createApp(deps: AppDeps) {
   api.get("/search", async (c) => {
     const parsed = searchQuery.safeParse(c.req.query());
     if (!parsed.success) return c.json({ error: "Invalid query", issues: parsed.error.issues }, 400);
-    const { q, mode, limit, cursor } = parsed.data;
+    const { q, mode, limit, cursor, from, to } = parsed.data;
+    const years = from !== undefined || to !== undefined ? { from, to } : undefined;
 
     const terms = parseSearchTerms(q);
     if (!terms.length) return c.json({ error: "Query has no searchable terms" }, 400);
 
-    const page = await deps.images.search(terms, { mode, limit, cursor });
-    log.info("Search", { user: c.get("user"), terms, mode, results: page.items.length });
+    const page = await deps.images.search(terms, { mode, limit, cursor, years });
+    log.info("Search", { user: c.get("user"), terms, mode, years, results: page.items.length });
     c.header("Cache-Control", "no-store");
     return c.json({ terms, items: page.items.map(toImageDto), nextCursor: page.nextCursor });
   });

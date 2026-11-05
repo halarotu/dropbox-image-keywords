@@ -4,6 +4,17 @@ import { SessionExpiredError, searchImages, thumbnailUrl, type Image, type Searc
 interface Search {
   q: string;
   mode: SearchMode;
+  /** Inclusive range of years taken; null means open-ended. */
+  from: number | null;
+  to: number | null;
+}
+
+const FIRST_YEAR = 1990;
+const YEARS = Array.from({ length: new Date().getFullYear() - FIRST_YEAR + 1 }, (_, i) => new Date().getFullYear() - i);
+
+function parseYear(v: string | null): number | null {
+  const n = Number(v);
+  return v && Number.isInteger(n) && n >= 1900 && n <= 2100 ? n : null;
 }
 
 type State =
@@ -15,13 +26,18 @@ type State =
 /** The search lives in the URL, so back/forward and bookmarks work. */
 function readSearch(): Search {
   const params = new URLSearchParams(window.location.search);
-  return { q: params.get("q") ?? "", mode: params.get("mode") === "any" ? "any" : "all" };
+  let from = parseYear(params.get("from"));
+  let to = parseYear(params.get("to"));
+  if (from !== null && to !== null && from > to) [from, to] = [to, from];
+  return { q: params.get("q") ?? "", mode: params.get("mode") === "any" ? "any" : "all", from, to };
 }
 
 function writeSearch(s: Search) {
   const params = new URLSearchParams();
   if (s.q) params.set("q", s.q);
   if (s.mode === "any") params.set("mode", "any");
+  if (s.from !== null) params.set("from", String(s.from));
+  if (s.to !== null) params.set("to", String(s.to));
   const qs = params.toString();
   window.history.pushState(null, "", qs ? `?${qs}` : window.location.pathname);
 }
@@ -57,7 +73,7 @@ export function App() {
     }
     const ctrl = new AbortController();
     setState({ kind: "loading" });
-    searchImages(search.q, search.mode, null, ctrl.signal)
+    searchImages(search.q, search.mode, search, null, ctrl.signal)
       .then((r) => setState({ kind: "done", items: r.items, nextCursor: r.nextCursor, loadingMore: false }))
       .catch((err) => {
         if (!ctrl.signal.aborted) setState(toError(err));
@@ -80,7 +96,7 @@ export function App() {
     if (state.kind !== "done" || !state.nextCursor || state.loadingMore) return;
     setState({ ...state, loadingMore: true });
     try {
-      const r = await searchImages(search.q, search.mode, state.nextCursor);
+      const r = await searchImages(search.q, search.mode, search, state.nextCursor);
       setState({ kind: "done", items: [...state.items, ...r.items], nextCursor: r.nextCursor, loadingMore: false });
     } catch (err) {
       setState(toError(err));
@@ -119,6 +135,45 @@ export function App() {
               onChange={() => submit({ ...search, mode: "any" })}
             />
             Any word
+          </label>
+        </fieldset>
+        <fieldset className="years">
+          <label>
+            From
+            <select
+              value={search.from ?? ""}
+              onChange={(e) => {
+                const from = parseYear(e.target.value);
+                // Keep the range valid: a later "from" pushes "to" open.
+                const to = from !== null && search.to !== null && search.to < from ? null : search.to;
+                submit({ ...search, from, to });
+              }}
+            >
+              <option value="">Any year</option>
+              {YEARS.map((y) => (
+                <option key={y} value={y}>
+                  {y}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            To
+            <select
+              value={search.to ?? ""}
+              onChange={(e) => {
+                const to = parseYear(e.target.value);
+                const from = to !== null && search.from !== null && search.from > to ? null : search.from;
+                submit({ ...search, from, to });
+              }}
+            >
+              <option value="">Any year</option>
+              {YEARS.map((y) => (
+                <option key={y} value={y}>
+                  {y}
+                </option>
+              ))}
+            </select>
           </label>
         </fieldset>
       </header>
@@ -163,7 +218,7 @@ export function App() {
           onClose={() => setSelected(null)}
           onKeyword={(k) => {
             setSelected(null);
-            submit({ q: k, mode: "all" });
+            submit({ ...search, q: k, mode: "all" });
           }}
         />
       )}
@@ -186,7 +241,8 @@ function Viewer({ img, onClose, onKeyword }: { img: Image; onClose: () => void; 
           <div className="meta">
             <strong>{img.name}</strong>
             <span>{img.path}</span>
-            <span>{new Date(img.modifiedAt).toLocaleString()}</span>
+            {img.takenYear !== null && <span>Taken {img.takenYear}</span>}
+            <span>Modified {new Date(img.modifiedAt).toLocaleString()}</span>
           </div>
           <ul className="keywords">
             {img.keywords.map((k) => (

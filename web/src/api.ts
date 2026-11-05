@@ -6,6 +6,7 @@ export interface Image {
   path: string;
   keywords: string[];
   modifiedAt: string;
+  takenYear: number | null;
   contentHash: string;
 }
 
@@ -33,13 +34,22 @@ async function getJson<T>(url: string, signal?: AbortSignal): Promise<T> {
   return res.json();
 }
 
+/** Inclusive range of years the photo was taken; null means open-ended. */
+export interface YearRange {
+  from: number | null;
+  to: number | null;
+}
+
 export function searchImages(
   q: string,
   mode: SearchMode,
+  years: YearRange,
   cursor: string | null,
   signal?: AbortSignal,
 ): Promise<SearchResult> {
   const params = new URLSearchParams({ q, mode, limit: "48" });
+  if (years.from !== null) params.set("from", String(years.from));
+  if (years.to !== null) params.set("to", String(years.to));
   if (cursor) params.set("cursor", cursor);
   return getJson(`/api/search?${params}`, signal);
 }

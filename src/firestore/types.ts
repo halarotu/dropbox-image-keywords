@@ -1,4 +1,5 @@
 import type { Timestamp } from "@google-cloud/firestore";
+import type { TakenYearSource } from "../dropbox/takenYear";
 
 export type ImageStatus =
   | "pending" //    waiting for keywords (also used for retries, see nextAttemptAt)
@@ -16,6 +17,9 @@ export interface ImageDoc {
   contentHash: string;
   sizeBytes: number;
   modifiedAt: Timestamp;
+  /** Year the photo was taken, derived from the file name or folder (see deriveTakenYear). */
+  takenYear: number;
+  takenYearSource: TakenYearSource;
 
   status: ImageStatus;
   attempts: number;

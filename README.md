@@ -90,6 +90,17 @@ gcloud run jobs execute image-keywords --region europe-north1 --wait
 
 Logs appear in Cloud Logging as structured JSON. Filter by `severity>=WARNING` to see problems.
 
+**Upgrading to the year filter.** Search sorts on `takenYear`, and Firestore leaves out documents that don't have that field. On an existing deployment, roll out in this order:
+
+1. Deploy the job (step 7 of the script). New and updated images get `takenYear` from then on.
+2. Fill in the existing images. This reads and writes only Firestore, no Dropbox or LLM calls, and is safe to re-run:
+   ```bash
+   gcloud run jobs execute image-keywords --region europe-north1 --wait --args=backfill-taken-year
+   ```
+3. Create the new index (step 3c of the script) and wait until `gcloud firestore indexes composite list` shows it as `READY`.
+4. Deploy the API and web UI.
+5. Delete the old `status, searchTerms, modifiedAt DESC` index.
+
 ## Firestore data model
 
 `images/{dropboxFileId}`
@@ -98,6 +109,7 @@ Logs appear in Cloud Logging as structured JSON. Filter by `severity>=WARNING` t
 |---|---|
 | `path`, `pathLower`, `name` | current location in Dropbox |
 | `contentHash`, `rev`, `sizeBytes`, `modifiedAt` | Dropbox metadata |
+| `takenYear`, `takenYearSource` | Year the photo was taken, from a date in the file name (`filename`), else the deepest folder named after a year such as `2016` or `2016-07 Lapland` (`folder`), else the year the record was written (`default`). Recomputed whenever the scan updates the file. |
 | `status` | `pending` · `processing` · `done` · `failed` · `deleted` |
 | `keywords` | normalised keywords from the model, most important first |
 | `searchTerms` | keywords **plus their individual words** — query this field |
@@ -113,7 +125,7 @@ The Cloud Run service `image-keywords-web` runs the same image as the job with `
 
 | Endpoint | Returns |
 |---|---|
-| `GET /api/search?q=dog beach&mode=all\|any&limit=50&cursor=…` | `{ terms, items: [{ id, name, path, keywords, modifiedAt, contentHash }], nextCursor }`, newest first |
+| `GET /api/search?q=dog beach&mode=all\|any&from=2016&to=2020&limit=50&cursor=…` | `{ terms, items: [{ id, name, path, keywords, modifiedAt, takenYear, contentHash }], nextCursor }`, by `takenYear` then `modifiedAt`, newest first. `from` and `to` are optional, inclusive years taken. |
 | `GET /api/images/:id` | one tagged image |
 | `GET /api/images/:id/thumbnail?size=small\|large&v=<contentHash>` | JPEG (480×320 or 2048×1536) fetched from Dropbox |
 | `GET /api/healthz` | `ok`, no auth |

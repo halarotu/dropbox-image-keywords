@@ -56,10 +56,13 @@ gcloud firestore indexes composite create --collection-group=images \
 gcloud firestore indexes composite create --collection-group=images \
   --field-config=field-path=status,order=ascending \
   --field-config=field-path=searchTerms,array-config=contains || true
-#    c) search API, newest first: ... ORDER BY modifiedAt DESC
+#    c) search API with optional year range: ... takenYear >= / <= ... ORDER BY takenYear DESC, modifiedAt DESC
+#       Run `node dist/index.js backfill-taken-year` once before the API depends on this:
+#       documents without takenYear are left out of search results.
 gcloud firestore indexes composite create --collection-group=images \
   --field-config=field-path=status,order=ascending \
   --field-config=field-path=searchTerms,array-config=contains \
+  --field-config=field-path=takenYear,order=descending \
   --field-config=field-path=modifiedAt,order=descending || true
 
 # 4. Secrets (you'll be prompted to paste each value)

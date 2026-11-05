@@ -9,7 +9,8 @@ import { scanAll } from "./scanner";
 import { log } from "./util/logger";
 import { processDue } from "./worker";
 
-type Command = "scan" | "process" | "run";
+const COMMANDS = ["scan", "process", "run", "backfill-taken-year"] as const;
+type Command = (typeof COMMANDS)[number];
 
 async function main(command: Command): Promise<number> {
   const cfg = loadConfig();
@@ -26,6 +27,11 @@ async function main(command: Command): Promise<number> {
 
   const started = Date.now();
   try {
+    if (command === "backfill-taken-year") {
+      const r = await images.backfillTakenYear();
+      log.info("Backfilled takenYear", { ...r, durationSec: Math.round((Date.now() - started) / 1000) });
+      return 0;
+    }
     if (command === "scan" || command === "run") {
       await scanAll(cfg, dbx, images, syncState);
     }
@@ -41,8 +47,8 @@ async function main(command: Command): Promise<number> {
 }
 
 const arg = (process.argv[2] ?? "run") as Command;
-if (!["scan", "process", "run"].includes(arg)) {
-  console.error("Usage: node dist/index.js [scan|process|run]");
+if (!COMMANDS.includes(arg)) {
+  console.error(`Usage: node dist/index.js [${COMMANDS.join("|")}]`);
   process.exit(2);
 }
 

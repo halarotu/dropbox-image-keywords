@@ -12,6 +12,8 @@ const img = {
   keywords: ["dog", "beach"],
   searchTerms: ["dog", "beach"],
   modifiedAt: Timestamp.fromMillis(Date.UTC(2026, 0, 2)),
+  takenYear: 2016,
+  takenYearSource: "folder",
   contentHash: "hash1",
   status: "done",
   lastError: "should not leak",
@@ -62,7 +64,9 @@ test("search normalises terms and returns DTOs without internals", async () => {
   const d = deps();
   const res = await createApp(d).request("/api/search?q=Dogs,%20BEACH!&mode=any&limit=10", { headers: iap });
   const body = await res.json();
-  assert.deepEqual(d.searches, [{ terms: ["dogs", "beach"], mode: "any", limit: 10, cursor: undefined }]);
+  assert.deepEqual(d.searches, [
+    { terms: ["dogs", "beach"], mode: "any", limit: 10, cursor: undefined, years: undefined },
+  ]);
   assert.deepEqual(body.items, [
     {
       id: "abc",
@@ -70,6 +74,7 @@ test("search normalises terms and returns DTOs without internals", async () => {
       path: "/Photos/dog.jpg",
       keywords: ["dog", "beach"],
       modifiedAt: "2026-01-02T00:00:00.000Z",
+      takenYear: 2016,
       contentHash: "hash1",
     },
   ]);
@@ -80,6 +85,26 @@ test("search validates input", async () => {
   assert.equal((await app.request("/api/search", { headers: iap })).status, 400);
   assert.equal((await app.request("/api/search?q=!!!", { headers: iap })).status, 400);
   assert.equal((await app.request("/api/search?q=dog&limit=500", { headers: iap })).status, 400);
+  assert.equal((await app.request("/api/search?q=dog&from=2016.5", { headers: iap })).status, 400);
+  assert.equal((await app.request("/api/search?q=dog&from=abc", { headers: iap })).status, 400);
+  assert.equal((await app.request("/api/search?q=dog&from=1800", { headers: iap })).status, 400);
+  assert.equal((await app.request("/api/search?q=dog&from=2020&to=2016", { headers: iap })).status, 400);
+});
+
+test("search passes the year range through", async () => {
+  const d = deps();
+  const app = createApp(d);
+  assert.equal((await app.request("/api/search?q=dog&from=2016", { headers: iap })).status, 200);
+  assert.equal((await app.request("/api/search?q=dog&to=2018", { headers: iap })).status, 200);
+  assert.equal((await app.request("/api/search?q=dog&from=2016&to=2016", { headers: iap })).status, 200);
+  assert.deepEqual(
+    d.searches.map((s) => (s as { years: unknown }).years),
+    [
+      { from: 2016, to: undefined },
+      { from: undefined, to: 2018 },
+      { from: 2016, to: 2016 },
+    ],
+  );
 });
 
 test("thumbnail is immutable when the version matches, and supports 304", async () => {
@@ -115,8 +140,12 @@ test("parseSearchTerms splits on spaces and commas", () => {
 test("cursor round-trips and rejects garbage", () => {
   const c = decodeCursor(encodeCursor(img));
   assert.equal(c.id, "abc");
+  assert.equal(c.takenYear, 2016);
   assert.equal(c.modifiedAt.toMillis(), img.modifiedAt.toMillis());
   assert.throws(() => decodeCursor("garbage"), InvalidCursorError);
+  // Cursors from before takenYear existed ([modifiedAt, id]) are rejected, not misread.
+  const old = Buffer.from(JSON.stringify([img.modifiedAt.toMillis(), "abc"])).toString("base64url");
+  assert.throws(() => decodeCursor(old), InvalidCursorError);
 });
 
 test("AND search helpers", () => {
